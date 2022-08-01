@@ -28,7 +28,9 @@ CLI files are also supported.
 
 If the selected shortcut file cannot be loaded, iplboot will fallback to `/ipl.dol`. If that cannot be loaded either, iplboot will reboot to the onboard IPL (original GameCube intro and menu).
 
-For example, this configuration would boot straight into Swiss by default, or GBI if you held B, or the original GameCube intro if you held any other button:
+Holding D-Pad Left or the reset button will skip iplboot functionality and reboot straight into the onboard IPL.
+
+For example, this configuration would boot straight into Swiss by default, or GBI if you held B, or the original GameCube intro if you held D-Pad Left:
 - `/ipl.dol` - Swiss
 - `/b.dol` - GBI
 

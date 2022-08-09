@@ -9,40 +9,40 @@
 #include <ogc/system.h>
 #include "ffshim.h"
 #include "fatfs/ff.h"
-#include "utils.h"
+#include "types.h"
+#include "config.h"
 
 #include "stub.h"
 #define STUB_ADDR  0x80001000
 #define STUB_STACK 0x80003000
 
-#define VERBOSE_LOGGING 0
-
-u8 *dol = NULL;
-int dol_argc = 0;
 #define MAX_NUM_ARGV 1024
-char *dol_argv[MAX_NUM_ARGV];
+
+struct boot_payload
+{
+    BOOT_TYPE type,
+    char *dol,
+    char *argv[MAX_NUM_ARGV],
+    int argc
+}
+
+int debug_enabled = false;
+int verbose_enabled = false;
 u16 all_buttons_held;
 
-char *default_path = "/ipl.dol";
-struct shortcut {
-  u16 pad_buttons;
-  char *path;
-} shortcuts[] = {
-  {PAD_BUTTON_A,     "/a.dol"    },
-  {PAD_BUTTON_B,     "/b.dol"    },
-  {PAD_BUTTON_X,     "/x.dol"    },
-  {PAD_BUTTON_Y,     "/y.dol"    },
-  {PAD_TRIGGER_Z,    "/z.dol"    },
-  {PAD_BUTTON_START, "/start.dol"},
-  // NOTE: Shouldn't use L, R or Joysticks as analog inputs are calibrated on boot.
-};
-int num_shortcuts = sizeof(shortcuts)/sizeof(shortcuts[0]);
-
-void dol_alloc(int size)
+void scan_all_buttons_held()
 {
-    int mram_size = (SYS_GetArenaHi() - SYS_GetArenaLo());
-    kprintf("Memory available: %iB\n", mram_size);
+    PAD_ScanPads();
+    all_buttons_held = (
+        PAD_ButtonsHeld(PAD_CHAN0) |
+        PAD_ButtonsHeld(PAD_CHAN1) |
+        PAD_ButtonsHeld(PAD_CHAN2) |
+        PAD_ButtonsHeld(PAD_CHAN3)
+    );
+}
 
+u8 *dol_alloc(int size)
+{
     kprintf("DOL size is %iB\n", size);
 
     if (size <= 0)
@@ -51,20 +51,53 @@ void dol_alloc(int size)
         return;
     }
 
-    dol = (u8 *) memalign(32, size);
+    u8 *dol = (u8 *) memalign(32, size);
 
     if (!dol)
     {
         kprintf("Couldn't allocate memory\n");
     }
+
+    return dol;
 }
 
-void load_parse_cli(char *path)
+u8 *read_dol_file(const char *path)
 {
-    int path_length = strlen(path);
-    path[path_length - 3] = 'c';
-    path[path_length - 2] = 'l';
-    path[path_length - 1] = 'i';
+    kprintf("Reading %s\n", path);
+    FIL file;
+    FRESULT open_result = f_open(&file, path, FA_READ);
+    if (open_result != FR_OK)
+    {
+        kprintf("Failed to open file: %s\n", get_fresult_message(open_result));
+        return NULL;
+    }
+
+    size_t size = f_size(&file);
+    u8* dol = dol_alloc(size);
+    if (!dol) return NULL;
+
+    UINT _;
+    f_read(&file, dol, size, &_);
+    f_close(&file);
+
+    return dol;
+}
+
+const char *read_cli_file(const char *dol_path)
+{
+    size_t path_len = strlen(dol_path);
+    if (path_len > 4 && strncmp(dol_path + path_len - 4, ".dol", 4) == 0)
+    {
+        kprintf("Not reading CLI file: DOL path does not end in \".dol\"\n");
+        return;
+    }
+
+    char path[path_len + 1];
+    memcpy(path, dol_path, path_len - 3);
+    path[path_len - 3] = 'c';
+    path[path_len - 2] = 'l';
+    path[path_len - 1] = 'i';
+    path[path_len    ] = '\0';
 
     kprintf("Reading %s\n", path);
     FIL file;
@@ -109,52 +142,61 @@ void load_parse_cli(char *path)
       size++;
     }
 
-    // Parse CLI file
-    // https://github.com/emukidid/swiss-gc/blob/a0fa06d81360ad6d173acd42e4dd5495e268de42/cube/swiss/source/swiss.c#L1236
-    dol_argv[dol_argc] = path;
-    dol_argc++;
+    return cli;
+}
 
-    // First argument is at the beginning of the file
-    if (cli[0] != '\r' && cli[0] != '\n')
-    {
-        dol_argv[dol_argc] = cli;
-        dol_argc++;
-    }
-
+// https://github.com/emukidid/swiss-gc/blob/a0fa06d81360ad6d173acd42e4dd5495e268de42/cube/swiss/source/swiss.c#L1236
+int parse_cli_options(const char** argv, const char *cli)
+{
+    const char* line_indices[MAX_NUM_ARGV];
+    int line_lengths[MAX_NUM_ARGV];
+    int num_lines = 0;
+    
+    int line_start_index = 0;
+    
     // Search for the others after each newline
-    for (int i = 0; i < size; i++)
+    int cli_len = strlen(cli) + 1;
+    for (int i = 0; i < cli_len; i++)
     {
-        if (cli[i] == '\r' || cli[i] == '\n')
+        if (i = cli_len || cli[i] == '\r' || cli[i] == '\n')
         {
-            cli[i] = '\0';
-        }
-        else if (cli[i - 1] == '\0')
-        {
-            dol_argv[dol_argc] = cli + i;
-            dol_argc++;
-            if (dol_argc >= MAX_NUM_ARGV)
+            int line_len = i - line_start_index - 1;
+            if (line_len > 0)
             {
-                kprintf("Reached max of %i args.\n", MAX_NUM_ARGV);
-                break;
+                line_indices[num_lines] = line_start_index;
+                line_lengths[num_lines] = line_len;
+                num_lines++;
+                
+                if (num_lines >= MAX_NUM_ARGV)
+                {
+                    kprintf("Reached max of %i arg lines.\n", MAX_NUM_ARGV);
+                    break;
+                }
             }
+            line_start_index = i;
         }
     }
     
-    kprintf("Found %i CLI args\n", dol_argc);
+    kprintf("Found %i CLI args\n", argc);
 
-    #if VERBOSE_LOGGING
-    for (int i = 0; i < dol_argc; ++i) {
-        kprintf("arg%i: %s\n", i, dol_argv[i]);
+    if (is_verbose_enabled)
+    {
+        for (int i = 0; i < argc; ++i)
+        {
+            kprintf("arg%i: %s\n", i, argv[i]);
+        }
     }
-    #endif
+
+    return argc;
 }
 
-int load_fat(const char *slot_name, const DISC_INTERFACE *iface_, char **paths, int num_paths)
+int load_fat(struct boot_payload *payload, const char *slot_name, const DISC_INTERFACE *iface_)
 {
     int res = 0;
 
     kprintf("Trying %s\n", slot_name);
 
+    // Mount device.
     FATFS fs;
     iface = iface_;
     FRESULT mount_result = f_mount(&fs, "", 1);
@@ -166,37 +208,89 @@ int load_fat(const char *slot_name, const DISC_INTERFACE *iface_, char **paths, 
 
     char name[256];
     f_getlabel(slot_name, name, NULL);
-    kprintf("Mounted %s as %s\n", name, slot_name);
+    kprintf("Mounted %s from %s\n", name, slot_name);
 
-    for (int i = 0; i < num_paths; ++i)
+    // Read and parse config file for mounted FAT device.
+    configuration config;
+    if (!read_parse_config(&config))
     {
-        char *path = paths[i];
-        kprintf("Reading %s\n", path);
-        FIL file;
-        FRESULT open_result = f_open(&file, path, FA_READ);
-        if (open_result != FR_OK)
-        {
-            kprintf("Failed to open file: %s\n", get_fresult_message(open_result));
-            continue;
-        }
+        goto unmount;
+    }
+    
+    res = 1;
+    boot_payload->type = BOOT_TYPE_NONE;
+    
+    is_debug_enabled = config->is_debug_enabled;
+    is_verbose_enabled = config->is_verbose_enabled;
 
-        size_t size = f_size(&file);
-        dol_alloc(size);
-        if (!dol)
-        {
-            continue;
-        }
-        UINT _;
-        f_read(&file, dol, size, &_);
-        f_close(&file);
-
-        // Attempt to load and parse CLI file
-        load_parse_cli(path);
-
-        res = 1;
-        break;
+    kprintf("Found config file\n");
+    if (is_verbose_enabled)
+    {
+        kprintf("-----\n");
+        print_config(config);
+        kprintf("-----\n");
     }
 
+    // Check shortcuts and choose action.
+    struct boot_action *action = &config->default_action;
+    
+    for (int i = 0; i < NUM_SHORTCUTS; i++)
+    {
+        if (config->shortcut_actions[i].type == BOOT_TYPE_NONE) continue;
+        if (all_buttons_held & shortcuts[i].pad_buttons)
+        {
+            action = &config->shortcut_actions[i];
+            kprintf("Using %s button shortcut\n", shortcuts[i].name);
+            break;
+        }
+    }
+
+    if (action->type == BOOT_ACTION_ONBOARD)
+    {
+        kprintf("Will reboot to onboard IPL\n");
+        boot_payload->type = BOOT_ACTION_ONBOARD;
+        goto unmount;
+    }
+
+    if (action->type != BOOT_TYPE_DOL)
+    {
+        // Should never happen.
+        kprintf("Will do nothing\n");
+        goto unmount;
+    }
+
+    // Read DOL file.
+    u8* dol = read_dol_file(action->dol_path);
+    if (!dol)
+    {
+        goto unmount;
+    }
+
+    // Attempt to read CLI file if CLI options were not configured.
+    const char* dol_cli_options;
+    if (action->dol_cli_options)
+    {
+        dol_cli_options = action->dol_cli_options;
+        kprintf("Not reading CLI file: CLI options defined in config\n");
+    }
+    else
+    {
+        dol_cli_options = read_cli_file(action->dol_path);
+    }
+
+    // Parse CLI options.
+    args *dol_args;
+    if (dol_cli_options)
+    {
+        kprintf("Parsing CLI options...\n");
+        dol_args = parse_cli_options(dol_cli_options);
+    }
+
+    boot_payload->type = BOOT_TYPE_NONE;
+    boot_payload->dol = dol;
+    boot_payload->dol_args = dol_args;
+
+unmount:
     kprintf("Unmounting %s\n", slot_name);
     iface->shutdown();
     iface = NULL;
@@ -222,7 +316,7 @@ unsigned int convert_int(unsigned int in)
 #define GC_READY 0x88
 #define GC_OK    0x89
 
-int load_usb(char slot)
+int load_usb(struct loaded_boot_action *loaded_action, char slot)
 {
     kprintf("Trying USB Gecko in slot %c\n", slot);
 
@@ -273,7 +367,7 @@ int load_usb(char slot)
     usb_recvbuffer_safe(channel, &size, 4);
     size = convert_int(size);
 
-    dol_alloc(size);
+    u8 *dol = dol_alloc(size);
     unsigned char* pointer = dol;
 
     if(!dol)
@@ -292,33 +386,51 @@ int load_usb(char slot)
     if(size)
         usb_recvbuffer_safe(channel, (void *) pointer, size);
 
+    loaded_action->type = BOOT_TYPE_DOL;
+    loaded_action->dol = dol;
+
 end:
     return res;
 }
 
 extern u8 __xfb[];
 
+void wait_for_confirmation() {
+    // Wait until the A button or reset button is pressed.
+    int cur_state = true;
+    int last_state;
+    do
+    {
+        VIDEO_WaitVSync();
+        scan_all_buttons_held();
+        last_state = cur_state;
+        cur_state = all_buttons_held & PAD_BUTTON_A;
+    }
+    while (!last_state && cur_state);
+}
 void delay_exit() {
+    if (is_debug_enabled)
+    {
+        // When debug is enabled, always wait for confirmation before exit.
+        kprintf("\nDEBUG: Press A to continue\n");
+        wait_for_confirmation();
+        return;
+    }
+
     // Wait while the d-pad down direction or reset button is held.
     if (all_buttons_held & PAD_BUTTON_DOWN)
     {
-        kprintf("(release d-pad down to continue)\n");
+        kprintf("\nRelease d-pad down to continue\n");
     }
     if (SYS_ResetButtonDown())
     {
-        kprintf("(release reset button to continue)\n");
+        kprintf("\nRelease reset button to continue\n");
     }
 
     while (all_buttons_held & PAD_BUTTON_DOWN || SYS_ResetButtonDown())
     {
         VIDEO_WaitVSync();
-        PAD_ScanPads();
-        all_buttons_held = (
-            PAD_ButtonsHeld(PAD_CHAN0) |
-            PAD_ButtonsHeld(PAD_CHAN1) |
-            PAD_ButtonsHeld(PAD_CHAN2) |
-            PAD_ButtonsHeld(PAD_CHAN3)
-        );
+        scan_all_buttons_held();
     }
 }
 
@@ -348,68 +460,71 @@ int main()
     EXI_Sync(EXI_CHANNEL_0);
     EXI_Deselect(EXI_CHANNEL_0);
     EXI_Unlock(EXI_CHANNEL_0);
+    // Since we've disabled the Qoob, we wil reboot to the Nintendo IPL
 
     // Set the timebase properly for games
     // Note: fuck libogc and dkppc
     u32 t = ticks_to_secs(SYS_Time());
     settime(secs_to_ticks(t));
 
-    PAD_ScanPads();
+    scan_all_buttons_held();
 
-    all_buttons_held = (
-        PAD_ButtonsHeld(PAD_CHAN0) |
-        PAD_ButtonsHeld(PAD_CHAN1) |
-        PAD_ButtonsHeld(PAD_CHAN2) |
-        PAD_ButtonsHeld(PAD_CHAN3)
-    );
-
+    // Check if we should skip.
     if (all_buttons_held & PAD_BUTTON_LEFT || SYS_ResetButtonDown())
     {
-        // Since we've disabled the Qoob, we wil reboot to the Nintendo IPL
         kprintf("Skipped. Rebooting into original IPL...\n");
         delay_exit();
         return 0;
     }
 
-    char *paths[2];
-    int num_paths = 0;
+    // Attempt to load from each device.
+    int mram_size = SYS_GetArenaHi() - SYS_GetArenaLo();
+    kprintf("Memory available: %iB\n", mram_size);
 
-    for (int i = 0; i < num_shortcuts; i++) {
-      if (all_buttons_held & shortcuts[i].pad_buttons) {
-        paths[num_paths++] = shortcuts[i].path;
-        break;
-      }
+    struct loaded_boot_action loaded_action;
+    int res = (
+           load_usb(&loaded_action, 'B')
+        || load_fat(&loaded_action, "sdb", &__io_gcsdb, paths, num_paths)
+        || load_usb(&loaded_action, 'A')
+        || load_fat(&loaded_action, "sda", &__io_gcsda, paths, num_paths)
+        || load_fat(&loaded_action, "sd2", &__io_gcsd2, paths, num_paths)
+    );
+
+    if (!res)
+    {
+        // If we reach here, all attempts to load configuration failed.
+        kprintf("Configuration not found\n");
+        kprintf("\nPress A to reboot into onboard IPL\n");
+        wait_for_confirmation();
+        return 0;
     }
 
-    paths[num_paths++] = default_path;
-
-    if (load_usb('B')) goto load;
-
-    if (load_fat("sdb", &__io_gcsdb, paths, num_paths)) goto load;
-
-    if (load_usb('A')) goto load;
-
-    if (load_fat("sda", &__io_gcsda, paths, num_paths)) goto load;
-
-    if (load_fat("sd2", &__io_gcsd2, paths, num_paths)) goto load;
-
-load:
-    if (!dol)
+    if (loaded_boot_action.action == BOOT_ACTION_ONBOARD)
     {
-        // If we reach here, all attempts to load a DOL failed
-        // Since we've disabled the Qoob, we wil reboot to the Nintendo IPL
-        kprintf("No DOL loaded. Rebooting into original IPL...\n");
+        kprintf("Rebooting into onboard IPL...\n");
         delay_exit();
         return 0;
     }
-    
+
+    if (loaded_boot_action.action == BOOT_ACTION_NONE)
+    {
+        // We should only reach here if the DOL failed to load.
+        kprintf("\nPress A to reboot into onboard IPL\n");
+        wait_for_confirmation();
+        return 0;
+    }
+
+    // Prepare DOL argv.
     struct __argv dolargs;
     dolargs.commandLine = (char *) NULL;
     dolargs.length = 0;
     
     // https://github.com/emukidid/swiss-gc/blob/f5319aab248287c847cb9468325ebcf54c993fb1/cube/swiss/source/aram/sidestep.c#L350
-    if (dol_argc)
+    if (loaded_boot_action.dol_args)
     {
+        char** dol_argv = loaded_boot_action.dol_args->argv;
+        int dol_argc = loaded_boot_action.dol_args->argc;
+        
         dolargs.argvMagic = ARGV_MAGIC;
         dolargs.argc = dol_argc;
         dolargs.length = 1;
@@ -442,6 +557,7 @@ load:
         }
     }
 
+    // Boot DOL.
     memcpy((void *) STUB_ADDR, stub, stub_size);
     DCStoreRange((void *) STUB_ADDR, stub_size);
 
@@ -451,5 +567,7 @@ load:
     SYS_SwitchFiber((intptr_t) dol, 0,
                     (intptr_t) dolargs.commandLine, dolargs.length,
                     STUB_ADDR, STUB_STACK);
+    
+    // Will never reach here.
     return 0;
 }

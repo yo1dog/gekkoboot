@@ -1,6 +1,5 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <sdcard/gcsd.h>
 #include <string.h>
 #include <malloc.h>
 #include <unistd.h>
@@ -15,13 +14,19 @@
 #include "filesystem.h"
 #include "cli_args.h"
 
-#include "stub.h"
+#ifndef EMU_BUILD
+    #include <sdcard/gcsd.h>
+    #include "stub.h"
+    extern u8 __xfb[];
+#else
+    #include <sdcard/wiisd_io.h>
+    static void *__xfb = NULL;
+#endif
 
 // Global State
 // --------------------
 int debug_enabled = false;
 u16 all_buttons_held;
-extern u8 __xfb[];
 // --------------------
 
 void scan_all_buttons_held()
@@ -455,8 +460,21 @@ int load_usb(BOOT_PAYLOAD *payload, char slot)
     return res;
 }
 
-int main(int _argc, char **_argv)
+#ifdef EMU_BUILD
+int _main(int argc, char **argv);
+int main(int argc, char **argv)
 {
+    int res = _main(argc, argv);
+    kprintf("EMU_BUILD: Exited with %i. Press A to exit...\n", res);
+    wait_for_confirmation();
+    return res;
+}
+int _main(int argc, char **argv)
+#else
+int main(int _argc, char **_argv)
+#endif
+{
+#ifdef EMU_BUILD
     // GCVideo takes a while to boot up.
     // If VIDEO_GetPreferredMode is called before it's done,
     // it will not see the "component cable", and default to interlaced mode,
@@ -470,11 +488,15 @@ int main(int _argc, char **_argv)
             }
         }
     }
+#endif
 
     VIDEO_Init();
     PAD_Init();
     GXRModeObj *rmode = VIDEO_GetPreferredMode(NULL);
     VIDEO_Configure(rmode);
+#ifdef EMU_BUILD
+    __xfb = MEM_K0_TO_K1(SYS_AllocateFramebuffer(rmode));
+#endif
     VIDEO_SetNextFramebuffer(__xfb);
     VIDEO_SetBlack(FALSE);
     VIDEO_Flush();
@@ -512,6 +534,9 @@ int main(int _argc, char **_argv)
         }
     }
 
+#ifdef EMU_BUILD
+    should_ask = true;
+#endif
     if (should_ask)
     {
         kprintf("DEBUG: Press button...\n");
@@ -571,11 +596,16 @@ int main(int _argc, char **_argv)
 
     // Attempt to load from each device.
     int res = (
+#ifndef EMU_BUILD
            load_fat(&payload, "SD Gecko in slot B", &__io_gcsdb, shortcut_index)
         || load_fat(&payload, "SD Gecko in slot A", &__io_gcsda, shortcut_index)
         || load_fat(&payload, "SD2SP2", &__io_gcsd2, shortcut_index)
+#else
+           load_fat(&payload, "Wii SD", &__io_wiisd, shortcut_index)
+#endif
     );
 
+#ifndef EMU_BUILD
     if (!res || payload.type == BOOT_TYPE_USBGECKO)
     {
         payload.type = BOOT_TYPE_NONE;
@@ -585,6 +615,7 @@ int main(int _argc, char **_argv)
             || res
         );
     }
+#endif
 
     if (!res)
     {
@@ -650,6 +681,7 @@ int main(int _argc, char **_argv)
 
     kprintf("Booting DOL...\n");
 
+#ifndef EMU_BUILD
     // Load stub.
     memcpy((void *)STUB_ADDR, stub, (size_t)stub_size);
     DCStoreRange((void *)STUB_ADDR, (u32)stub_size);
@@ -669,4 +701,10 @@ int main(int _argc, char **_argv)
 
     // Will never reach here.
     return 0;
+#else
+    delay_exit();
+
+    kprintf("EMU_BUILD: Success!\n");
+    return 0;
+#endif
 }

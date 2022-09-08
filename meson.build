@@ -1,3 +1,4 @@
+# TODO: Add support for Dolphin build.
 project(
     'gekkoboot',
     ['c', 'cpp'],

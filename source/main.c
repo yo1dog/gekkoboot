@@ -1,6 +1,5 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <sdcard/gcsd.h>
 #include <string.h>
 #include <malloc.h>
 #include <unistd.h>
@@ -15,13 +14,19 @@
 #include "filesystem.h"
 #include "cli_args.h"
 
-#include "stub.h"
+#ifndef DOLPHIN_BUILD
+    #include <sdcard/gcsd.h>
+    #include "stub.h"
+    extern u8 __xfb[];
+#else
+    #include <sdcard/wiisd_io.h>
+    static void *__xfb = NULL;
+#endif
 
 // Global State
 // --------------------
 int debug_enabled = false;
 u16 all_buttons_held;
-extern u8 __xfb[];
 // --------------------
 
 void scan_all_buttons_held()
@@ -450,8 +455,21 @@ int load_usb(BOOT_PAYLOAD *payload, char slot)
     return res;
 }
 
+#ifdef DOLPHIN_BUILD
+int _main();
 int main()
 {
+    int res = _main();
+    kprintf("DOLPHIN: Exited with %i. Press A to exit...\n", res);
+    wait_for_confirmation();
+    return res;
+}
+int _main()
+#else
+int main()
+#endif
+{
+#ifdef DOLPHIN_BUILD
     // GCVideo takes a while to boot up.
     // If VIDEO_GetPreferredMode is called before it's done,
     // it will not see the "component cable", and default to interlaced mode,
@@ -465,11 +483,15 @@ int main()
             }
         }
     }
+#endif
 
     VIDEO_Init();
     PAD_Init();
     GXRModeObj *rmode = VIDEO_GetPreferredMode(NULL);
     VIDEO_Configure(rmode);
+#ifdef DOLPHIN_BUILD
+    __xfb = MEM_K0_TO_K1(SYS_AllocateFramebuffer(rmode));
+#endif
     VIDEO_SetNextFramebuffer(__xfb);
     VIDEO_SetBlack(FALSE);
     VIDEO_Flush();
@@ -492,6 +514,11 @@ int main()
     EXI_Unlock(EXI_CHANNEL_0);
     // Since we've disabled the Qoob, we wil reboot to the Nintendo IPL
 
+#ifdef DOLPHIN_BUILD
+    kprintf("DOLPHIN: Press button...\n");
+    do {VIDEO_WaitVSync(); scan_all_buttons_held();}
+    while (all_buttons_held == 0 || all_buttons_held == PAD_BUTTON_DOWN);
+#endif
     scan_all_buttons_held();
 
     // Check if d-pad down direction or reset button is held.
@@ -538,11 +565,15 @@ int main()
 
     // Attempt to load from each device.
     int res = (
+#ifndef DOLPHIN_BUILD
            load_usb(&payload, 'B')
         || load_fat(&payload, "SD Gecko in slot B", &__io_gcsdb, shortcut_index)
         || load_usb(&payload, 'A')
         || load_fat(&payload, "SD Gecko in slot A", &__io_gcsda, shortcut_index)
         || load_fat(&payload, "SD2SP2", &__io_gcsd2, shortcut_index)
+#else
+           load_fat(&payload, "Wii SD", &__io_wiisd, shortcut_index)
+#endif
     );
 
     if (!res)
@@ -609,6 +640,7 @@ int main()
 
     kprintf("Booting DOL...\n");
 
+#ifndef DOLPHIN_BUILD
     // Load stub.
     memcpy((void *)STUB_ADDR, stub, (size_t)stub_size);
     DCStoreRange((void *)STUB_ADDR, (u32)stub_size);
@@ -628,4 +660,10 @@ int main()
 
     // Will never reach here.
     return 0;
+#else
+    delay_exit();
+
+    kprintf("DOLPHIN: Success!\n");
+    return 0;
+#endif
 }

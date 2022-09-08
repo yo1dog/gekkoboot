@@ -56,6 +56,7 @@ gekkoboot = executable(
     'source/fatfs/ffsystem.c',
     'source/fatfs/ffunicode.c',
     'source/ffshim.c',
+    'source/inih/inih.c',
     version_file,
     font,
     dependencies: [
